@@ -1,11 +1,13 @@
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, random_split
 import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
 import os
 import torch.nn.functional as F
+from collections import namedtuple
+
 os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
 # Assuming the histogram data has shape (num_samples, channels, height, width)
 # If not, you will need to reshape the data accordingly.
@@ -27,11 +29,13 @@ class EnhancedConvBlock(nn.Module):
 class EnhancedConvNet(nn.Module):
     def __init__(self, in_channels, num_classes):
         super().__init__()
+        #self.maxpool = nn.MaxPool2d(kernel_size=2, stride=2)
         # Add more layers and increase complexity
-        self.layer1 = EnhancedConvBlock(in_channels, 64, kernel_size=3, stride=1, dropout=0.3)
-        self.layer2 = EnhancedConvBlock(64, 128, kernel_size=3, stride=1, dropout=0.3)
-        self.layer3 = EnhancedConvBlock(128, 256, kernel_size=3, stride=1, dropout=0.4)
-        self.layer4 = EnhancedConvBlock(256, 512, kernel_size=3, stride=1, dropout=0.4)
+        self.layer1 = EnhancedConvBlock(in_channels, 32, kernel_size=3, stride=1, dropout=0.3)
+        self.layer2 = EnhancedConvBlock(32, 64, kernel_size=3, stride=1, dropout=0.3)
+        self.layer3 = EnhancedConvBlock(64, 128, kernel_size=3, stride=1, dropout=0.3)
+        self.layer4 = EnhancedConvBlock(128, 256, kernel_size=3, stride=1, dropout=0.3)
+        self.layer5 = EnhancedConvBlock(256, 512, kernel_size=3, stride=1, dropout=0.3)
 
         # Adaptive pooling layer remains the same
         self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))
@@ -41,20 +45,25 @@ class EnhancedConvNet(nn.Module):
 
         # Fully connected layers
         self.fc1 = nn.Linear(512, 256)
-        self.fc2 = nn.Linear(256, num_classes)
+        self.fc2 = nn.Linear(256, 128)
+        self.fc3 = nn.Linear(128,64)
+        self.fc4 = nn.Linear(64, num_classes)
 
     def forward(self, x):
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
+        x = self.layer5(x)
         x = self.adaptive_pool(x)
         x = self.flatten(x)
         x = F.relu(self.fc1(x))
-        x = self.fc2(x)
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        x = self.fc4(x)
         return x
 
-def regression_accuracy(output, target, threshold=0.15):
+def regression_accuracy(output, target, threshold=0.1):
     """
     Calculate the 'accuracy' for a regression task. A prediction is considered
     correct if it's within a specified threshold of the actual value.
@@ -72,18 +81,18 @@ def regression_accuracy(output, target, threshold=0.15):
     return accuracy.item()
 
 def l1_l2_loss(pred, true, l1_weight):
-    loss = F.mse_loss(pred, true)
-
+    rmse_loss = torch.sqrt(torch.mean((pred-true)**2))
+    mse_loss = torch.mean((pred-true)**2)
     if l1_weight > 0:
         l1 = F.l1_loss(pred, true)
-        loss += l1
+        loss = mse_loss *(1-l1_weight) +  l1*l1_weight
 
     return loss
 
 # Define training function
 def train_model(model, train_loader, val_loader, epochs, learning_rate, weight_decay, patience, device):
-    #optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    optimizer =torch.optim.SGD(model.parameters(), lr=learning_rate,momentum=0.9,weight_decay=weight_decay)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    #optimizer =torch.optim.SGD(model.parameters(), lr=learning_rate,momentum=0.9,weight_decay=weight_decay)
     #scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10, verbose=True)
     best_val_loss = np.inf
     best_val_accuracy = 0
@@ -174,6 +183,7 @@ def train_model(model, train_loader, val_loader, epochs, learning_rate, weight_d
 # Load data
 data = np.load('data/img_output/histogram_all_full.npz')
 images = data['output_image']
+print("Image inside histogram size: ", len(images))
 yields = data['output_yield']
 years = data['output_year']
 
@@ -181,29 +191,37 @@ years = data['output_year']
 # images = (images - images.mean(axis=(0, 2, 3), keepdims=True))
 # Normalize images
 # Calculate mean and standard deviation for normalization
+epsilon = 1e-10
 mean = images.mean(axis=(0, 2, 3), keepdims=True)
-std = images.std(axis=(0, 2, 3), keepdims=True)
+std = images.std(axis=(0, 2, 3), keepdims=True)+ epsilon
 # Apply normalization: (X - mean) / std
-images_normalized = (images - mean) / std
+images_normalized = (images - mean) / std 
 
 # Split the data into training and validation sets
 train_indices = (years >= 2001) & (years <= 2021)
-val_indices = years ==2022
-train_images, val_images = images[train_indices], images[val_indices]
-train_yields, val_yields = yields[train_indices], yields[val_indices]
+test_indices = years ==2022
+train_images, test_images = images_normalized[train_indices], images_normalized[test_indices]
+train_yields, test_yields = yields[train_indices], yields[test_indices]
+
 
 # Convert to PyTorch tensors
 train_images_tensor = torch.tensor(train_images, dtype=torch.float32)
-val_images_tensor = torch.tensor(val_images, dtype=torch.float32)
 train_yields_tensor = torch.tensor(train_yields, dtype=torch.float32).view(-1, 1)
-val_yields_tensor = torch.tensor(val_yields, dtype=torch.float32).view(-1, 1)
+# test data
+test_images_tensor = torch.tensor(test_images, dtype=torch.float32)
+test_yields_tensor = torch.tensor(test_yields, dtype=torch.float32).view(-1, 1)
 
 
 # Create DataLoaders
-train_dataset = TensorDataset(train_images_tensor, train_yields_tensor)
-val_dataset = TensorDataset(val_images_tensor, val_yields_tensor)
-train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=16)
+#train_dataset_1 = TensorDataset(train_images_tensor, train_yields_tensor)
+total_size = len(train_images_tensor)
+print("Train images size: ", total_size)
+val_size = total_size // 5
+train_size = total_size - val_size
+train_dataset, val_dataset = random_split(TensorDataset(train_images_tensor, train_yields_tensor), (train_size, val_size))
+
+train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False)
 
 # Initialize the model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -216,10 +234,36 @@ train_losses, val_losses, train_accuracies, val_accuracies = train_model(
     model=model,
     train_loader=train_loader,
     val_loader=val_loader,
-    epochs=1000,  # Adjust as needed
-    learning_rate=0.0001,  # Adjust as needed
+    epochs=2000,  # Adjust as needed
+    learning_rate=0.00001,  # Adjust as needed
     weight_decay=5e-4,  # Adjust as needed
-    patience=20,  # Adjust as needed
+    patience=15,  # Adjust as needed
     device=device
 )
 print(model)
+
+# predict part
+# training dataset
+train_dataset = TensorDataset(train_images_tensor, train_yields_tensor)
+# testing dataset
+test_dataset = TensorDataset(test_images_tensor, test_yields_tensor)
+# training loader
+train_dataloader = DataLoader(train_dataset, batch_size=4)
+# testing loader
+test_loader = DataLoader(test_dataset, batch_size=4, shuffle=False)
+
+model.eval()
+total_test_loss, total_test_accuracy, total_test_rmse = 0, 0, 0
+with torch.no_grad():
+    for inputs, targets in test_loader:
+        inputs, targets = inputs.to(device), targets.to(device)
+        outputs = model(inputs)
+        test_loss = l1_l2_loss(outputs, targets,l1_weight = 0.3)
+        total_test_loss += test_loss.item()
+        total_test_accuracy += regression_accuracy(outputs, targets)
+        total_test_rmse += torch.sqrt(torch.mean((outputs-targets)**2)).item()
+
+avg_test_loss = total_test_loss / len(test_loader)
+avg_test_accuracy = total_test_accuracy / len(test_loader)
+avg_test_rmse = total_test_rmse/len(test_loader)
+print(f'Prediction on 2022 Loss: {avg_test_loss:.4f}, Accuracy: {avg_test_accuracy:.2f}%, RMSE: {avg_test_rmse:.2f}')
